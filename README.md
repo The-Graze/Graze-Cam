@@ -16,3 +16,6 @@ other camera and mirror improvments
 such as
 
 ![Untitled](https://github.com/The-Graze/Graze-Cam/assets/82724623/7317566c-ff20-47e4-9170-f8dd215036f7)
+
+
+(mirror is higer quality from https://github.com/The-Graze/BetterMirror)
