@@ -5,8 +5,8 @@
     /// </summary>
     internal class PluginInfo
     {
-        public const string GUID = "GrazeCam.By-Graze";
-        public const string Name = "Graze_Cam";
-        public const string Version = "1.0.0";
+        public const string GUID = "GrazeCam";
+        public const string Name = "Graze Cam";
+        public const string Version = "2.0";
     }
 }

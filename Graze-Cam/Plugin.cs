@@ -1,226 +1,227 @@
 ﻿using BepInEx;
+using BepInEx.Configuration;
 using Cinemachine;
-using Mono.Security.Interface;
-using PlayFab.ExperimentationModels;
-using System;
 using System.Collections;
-using System.IO;
-using System.Reflection;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.XR;
-using Utilla;
+using System.Linq;
+using TMPro;
+using System;
+using Photon.Pun;
+using GorillaNetworking;
 
 namespace Graze_Cam
 {
-    [BepInDependency("org.legoandmars.gorillatag.utilla")]
     [BepInPlugin(PluginInfo.GUID, PluginInfo.Name, PluginInfo.Version)]
     public class Plugin : BaseUnityPlugin
     {
-        private readonly XRNode rNode = XRNode.RightHand;
-        private readonly XRNode lNode = XRNode.LeftHand;
-        //GameObject camstore;
-        GameObject CamModel;
-        Camera cam;
-        public int cull;
-        public static volatile Plugin Instance;
-        CinemachineVirtualCamera defCamsys;
-        bool Middle;
-        bool firstP;
-        bool left;
-        bool right;
-        bool cooldown;
-        bool dropped;
-        RenderTexture camscreen;
-        bool inLeft;
-        bool inRight;
-        Camera TexCam;
-        GameObject Rhand;
-        GameObject Lhand;
-        Transform store;
-        void Start()
+        public static Plugin Instance;
+
+        private Camera useCam;
+        public Camera CameraCam => Plugin.Instance.useCam;
+
+        private ConfigEntry<bool> leftStick;
+
+        private CinemachineBrain camBrain;
+        private CinemachineVirtualCamera virtualCamera;
+        private Cinemachine3rdPersonFollow thirdPFollow;
+        private CinemachineSameAsFollowTarget saFollowTarget;
+
+        private GameObject hintCanvas;
+        private TextMeshPro textBox;
+
+        private float rotationSpeed = 2.0f;
+        private float defaultFOV;
+        private int direction;
+        private Quaternion targetRotation;
+        private bool isRotating, Player, firstPerson, isInitialized, debounce, inFirstPerson, click;
+
+        public Plugin()
         {
-            Utilla.Events.GameInitialized += OnGameInitialized;
+            HarmonyPatches.ApplyHarmonyPatches();
             Instance = this;
+            leftStick = Config.Bind("Settings", "LeftStick", true);
         }
-        void OnGameInitialized(object sender, EventArgs e)
+
+        private IEnumerator Spawned()
         {
-            GameObject.Find("Level").AddComponent<LayerChanger>();
-            cam = GameObject.Find("Shoulder Camera").GetComponent<Camera>();
-            defCamsys = cam.transform.GetChild(0).GetComponent<CinemachineVirtualCamera>();
-            Rhand = GameObject.Find("Global/Local VRRig/Local Gorilla Player/rig/body/shoulder.R/upper_arm.R/forearm.R/hand.R/palm.01.R");
-            Lhand = GameObject.Find("Global/Local VRRig/Local Gorilla Player/rig/body/shoulder.L/upper_arm.L/forearm.L/hand.L/palm.01.L");
-            Stream str = Assembly.GetExecutingAssembly().GetManifestResourceStream("Graze-Cam.Assets.cam");
-            AssetBundle bundle = AssetBundle.LoadFromStream(str);
-            GameObject sluber = bundle.LoadAsset<GameObject>("CamModel");
-            CamModel = Instantiate(sluber, cam.transform);
-            foreach (Transform t in CamModel.transform)
+            yield return new WaitForEndOfFrame();
+            useCam = GorillaTagger.Instance.thirdPersonCamera.GetComponentInChildren<Camera>();
+
+            int metaReportScreen = 1 << LayerMask.NameToLayer("MetaReportScreen");
+            int gorillaSpectator = 1 << LayerMask.NameToLayer("Gorilla Spectator");
+            int mirrorOnlyMask = 1 << LayerMask.NameToLayer("MirrorOnly");
+            int noMirrorMask = 1 << LayerMask.NameToLayer("NoMirror");
+
+            useCam.cullingMask &= ~metaReportScreen;
+            useCam.cullingMask |= gorillaSpectator;
+            useCam.cullingMask |= mirrorOnlyMask;
+            useCam.cullingMask &= ~noMirrorMask;
+
+            camBrain = useCam.GetComponent<CinemachineBrain>();
+            virtualCamera = camBrain.ActiveVirtualCamera.VirtualCameraGameObject.GetComponent<CinemachineVirtualCamera>();
+            thirdPFollow = virtualCamera.transform.GetComponentInChildren<Cinemachine3rdPersonFollow>();
+            saFollowTarget = virtualCamera.transform.GetComponentInChildren<CinemachineSameAsFollowTarget>();
+
+            saFollowTarget.m_Damping = 1;
+            thirdPFollow.Damping = new Vector3(1, -0.5f, 1);
+            thirdPFollow.CameraCollisionFilter = GorillaLocomotion.Player.Instance.locomotionEnabledLayers;
+
+            defaultFOV = useCam.fieldOfView;
+
+            isInitialized = true;
+        }
+
+        private void Start()
+        {
+            GorillaTagger.OnPlayerSpawned(() => StartCoroutine(Spawned()));
+        }
+
+        private void StartRotation(int dir)
+        {
+            Player = !Player;
+            direction = dir;
+            targetRotation = Quaternion.Euler(0, 180 * direction, 0) * thirdPFollow.FollowTarget.transform.localRotation;
+            isRotating = true;
+        }
+
+        private void UpdateRotation()
+        {
+            thirdPFollow.FollowTarget.transform.localRotation = Quaternion.RotateTowards(thirdPFollow.FollowTarget.transform.localRotation, targetRotation, rotationSpeed * Time.deltaTime * 180);
+
+            if (Quaternion.Angle(thirdPFollow.FollowTarget.transform.localRotation, targetRotation) < 0.1f)
             {
-                t.gameObject.layer = LayerMask.NameToLayer("NoMirror");
+                thirdPFollow.FollowTarget.transform.localRotation = targetRotation;
+                isRotating = false;
             }
-            camscreen = new RenderTexture(Screen.width, Screen.height, 24);
-            TexCam = new GameObject("TexCam").AddComponent<Camera>();
-            TexCam.targetTexture = camscreen;
-            CamModel.transform.GetChild(4).GetComponent<Renderer>().material.mainTexture = camscreen;
-            TexCam.transform.SetParent(cam.transform, false);
-            TexCam.farClipPlane = cam.farClipPlane;
-            TexCam.nearClipPlane = 0.03f;
-            cam.fieldOfView = TexCam.fieldOfView;
         }
 
-        void Update()
+        private void AlwaysRun()
         {
-            InputDevices.GetDeviceAtXRNode(lNode).TryGetFeatureValue(UnityEngine.XR.CommonUsages.primary2DAxisClick, out left);
-            InputDevices.GetDeviceAtXRNode(rNode).TryGetFeatureValue(UnityEngine.XR.CommonUsages.primary2DAxisClick, out right);
-
-            cam.cullingMask = cull;
-            TexCam.cullingMask = cull;
-           // TexCam.transform.rotation = cam.transform.rotation;
-
-            if (cam.transform.parent == null)
+            if (hintCanvas == null)
             {
-                dropped = true;
+                hintCanvas = Instantiate(Camera.main.transform.FindChildRecursive("DebugCanvas").gameObject, Camera.main.transform.FindChildRecursive("DebugCanvas").parent);
+                hintCanvas.transform.localPosition = new Vector3(0.2f, 0.02f, 0.3f);
+                hintCanvas.transform.localRotation = Quaternion.Euler(343.5097f, 0, 0);
+                textBox = hintCanvas.transform.GetChild(0).GetComponent<TextMeshPro>();
+                Destroy(hintCanvas.GetComponent<DebugHudStats>());
+                hintCanvas.name = "HintCanvas";
+                hintCanvas.layer = LayerMask.NameToLayer("MetaReportScreen");
+                textBox.gameObject.layer = LayerMask.NameToLayer("MetaReportScreen");
             }
             else
             {
-                dropped = false;
-                cam.transform.rotation = cam.transform.parent.rotation;
-            }
+                hintCanvas.SetActive(true);
+                useCam.nearClipPlane = 0.00001f;
+                useCam.farClipPlane = float.MaxValue;
+                camBrain.enabled = !firstPerson;
 
-
-            if (cooldown == false)
-            {
-                if (left && right)
+                if (!firstPerson)
                 {
-                    if (!Middle) SetMiddle();
-                    else TMiddle();
-
-                    cooldown = true;
-                    StartCoroutine(Cooldown(.5f));
+                    textBox.text = isRotating ? DirToArrow() : debounce ? "" : "";
                 }
-                if (left && !right)
+                if (!isRotating)
                 {
-                    SetLeft();
-
-                    cooldown = true;
-                    StartCoroutine(Cooldown(.5f));
-                }
-                if (!left && right)
-                {
-                    SetRight();
-
-                    cooldown = true;
-                    StartCoroutine(Cooldown(.5f));
+                    textBox.text = debounce ? (inFirstPerson ? "FIRST" : $"THIRD {Facing()}") : "";
                 }
             }
-           if (inLeft || inRight || !Middle || dropped)
-           {
-                CamModel.SetActive(true);
-           }
-            else CamModel.SetActive(false);
+        }
 
-            if (inLeft)
+        private void FixedUpdate()
+        {
+            if (!isInitialized) return;
+
+            ControllerInputPoller.instance.leftControllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out bool lStickClick);
+            ControllerInputPoller.instance.rightControllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out bool rStickClick);
+            click = leftStick.Value ? lStickClick : rStickClick;
+
+            if (click && !debounce && !isRotating)
             {
-                CamModel.transform.localScale = new Vector3 (2f, 2f, 2f);
-                cam.transform.localRotation = Quaternion.Euler(0f, 270f, 0f);
+                debounce = true;
+                firstPerson = !firstPerson;
+                StartCoroutine(Debounce());
             }
-            else if(inRight) CamModel.transform.localScale = new Vector3(-2f, 2f, 2f); CamModel.transform.localPosition = new Vector3(0.05f, 0, 0);
-        }
 
-        void TMiddle()
-        {
-            cam.transform.parent = Camera.main.transform;
-            firstP = !firstP;
-            defCamsys.enabled = !firstP;
-            cam.transform.localPosition = Vector3.zero;
-        }
-        void SetMiddle()
-        {
-            inLeft = false;
-            inRight = false;
-            Middle = true;
-            TMiddle();
-        }
+            camBrain.enabled = !firstPerson;
 
-        void DropCam()
-        {
-            defCamsys.enabled = false;
-            cam.transform.parent = null;
-            if (inLeft)
+            if (firstPerson)
             {
-                cam.transform.rotation = store.rotation;
-            }
-            inLeft = false;
-            inRight = false;
-            Middle = false;
-        }
-
-        void SetLeft()
-        {
-            if (inLeft)
-            {
-                store = cam.transform;
-                store.rotation = Quaternion.Euler(cam.transform.localRotation.x, cam.transform.localRotation.y - 90f, cam.transform.localRotation.z);
-                DropCam();
+                if (!inFirstPerson)
+                {
+                    useCam.transform.SetParent(Camera.main.transform, false);
+                    useCam.transform.localPosition = Vector3.zero;
+                    useCam.transform.localRotation = Quaternion.Euler(Vector3.zero);
+                    foreach (GameObject g in GorillaTagger.Instance.offlineVRRig.overrideCosmetics)
+                    {
+                        g.layer = LayerMask.NameToLayer("NoMirror");
+                    }
+                    useCam.fieldOfView = 90;
+                    inFirstPerson = true;
+                }
+                FirstPersonView();
             }
             else
             {
-                inLeft = true;
-                inRight = false;
-                Middle = false;
-                defCamsys.enabled = false;
-                cam.transform.parent = Lhand.transform;
-                cam.transform.localPosition = Vector3.zero;
-                //cam.transform.localRotation = Quaternion.Euler(0f, 0f, 270f);
+                if (inFirstPerson)
+                {
+                    useCam.transform.SetParent(GorillaTagger.Instance.thirdPersonCamera.transform, false);
+                    useCam.transform.localPosition = Vector3.zero;
+                    useCam.transform.localRotation = targetRotation;
+                    foreach (GameObject g in GorillaTagger.Instance.offlineVRRig.overrideCosmetics)
+                    {
+                        g.layer = 0;
+                    }
+                    useCam.fieldOfView = defaultFOV;
+                    inFirstPerson = false;
+                }
+                ThirdPersonView();
             }
+
+            AlwaysRun();
         }
 
-        void SetRight()
+        private void ThirdPersonView()
         {
-            if (inRight)
+            Vector2 primary2DAxis = leftStick.Value ? ControllerInputPoller.instance.leftControllerPrimary2DAxis : ControllerInputPoller.instance.rightControllerPrimary2DAxis;
+            if (primary2DAxis.x < -0.5f && !isRotating)
             {
-                DropCam();
+                StartRotation(-1);
             }
-            else
+            else if (primary2DAxis.x > 0.5f && !isRotating)
             {
-                inLeft = false;
-                inRight = true;
-                Middle = false;
-                defCamsys.enabled = false;
-                cam.transform.parent = Rhand.transform;
-                cam.transform.localPosition = new Vector3(-0.1f, 0.0f, 0.0f);
-               // cam.transform.localRotation = Quaternion.Euler(0f, 270f, 90f);
+                StartRotation(1);
             }
-        }
-        IEnumerator Cooldown(float sec)
-        {
-            yield return new WaitForSeconds(sec);
-            cooldown = false;
+
+            if (isRotating)
+            {
+                UpdateRotation();
+            }
+
+            float xOffset = Player ? 0.5f : -0.5f;
+            thirdPFollow.FollowTarget.transform.localPosition = new Vector3(xOffset, -0.15f, 0);
         }
 
-    }
-
-    public class LayerChanger : MonoBehaviour
-    {
-        void Start()
+        private void FirstPersonView()
         {
-            if (gameObject.layer == LayerMask.NameToLayer("NoMirror"))
-            {
-                gameObject.layer = 0;
-            }
-            if (gameObject.name == "Mirror Backdrop")
-            {
-                Destroy(gameObject);
-            }
-            if (gameObject.name == "CameraC")
-            {
-                Plugin.Instance.cull = GetComponent<Camera>().cullingMask;
-                GetComponent<Camera>().farClipPlane = 35;
-            }
-            foreach (Transform t in gameObject.transform)
-            {
-                t.gameObject.AddComponent<LayerChanger>();
-            }
-            Destroy(this);
+            useCam.transform.position = new Vector3(Camera.main.transform.position.x, Mathf.Lerp(useCam.transform.position.y, Camera.main.transform.position.y, 75 * Time.deltaTime), Camera.main.transform.position.z);
+            useCam.transform.rotation = Quaternion.Slerp(useCam.transform.rotation, Camera.main.transform.rotation, 5f * Time.deltaTime);
+        }
+
+        private IEnumerator Debounce()
+        {
+            yield return new WaitForSecondsRealtime(1.5f);
+            debounce = false;
+        }
+
+        private string DirToArrow()
+        {
+            return direction == -1 ? "<--\n" + Facing() : direction == 1 ? "   -->\n" + Facing() : "";
+        }
+
+        private string Facing()
+        {
+            return Player ? "FACING" : "BEHIND";
         }
     }
 }
