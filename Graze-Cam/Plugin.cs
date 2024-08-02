@@ -2,14 +2,9 @@
 using BepInEx.Configuration;
 using Cinemachine;
 using System.Collections;
-using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.XR;
-using System.Linq;
 using TMPro;
-using System;
-using Photon.Pun;
-using GorillaNetworking;
 
 namespace Graze_Cam
 {
@@ -31,50 +26,53 @@ namespace Graze_Cam
         private GameObject hintCanvas;
         private TextMeshPro textBox;
 
+        GameObject NoVrHitbox;
+
         private float rotationSpeed = 2.0f;
         private float defaultFOV;
         private int direction;
         private Quaternion targetRotation;
-        private bool isRotating, Player, firstPerson, isInitialized, debounce, inFirstPerson, click;
+        private bool isRotating, Player, firstPerson, isInitialized, debounce, inFirstPerson, click, VRLoaded, nonVrReady;
 
         public Plugin()
         {
-            HarmonyPatches.ApplyHarmonyPatches();
             Instance = this;
-            leftStick = Config.Bind("Settings", "LeftStick", true);
         }
 
         private IEnumerator Spawned()
         {
-            yield return new WaitForEndOfFrame();
-            useCam = GorillaTagger.Instance.thirdPersonCamera.GetComponentInChildren<Camera>();
+            if (VRLoaded)
+            {
+                yield return new WaitForEndOfFrame();
+                useCam = GorillaTagger.Instance.thirdPersonCamera.GetComponentInChildren<Camera>();
 
-            int metaReportScreen = 1 << LayerMask.NameToLayer("MetaReportScreen");
-            int gorillaSpectator = 1 << LayerMask.NameToLayer("Gorilla Spectator");
-            int mirrorOnlyMask = 1 << LayerMask.NameToLayer("MirrorOnly");
-            int noMirrorMask = 1 << LayerMask.NameToLayer("NoMirror");
+                int metaReportScreen = 1 << LayerMask.NameToLayer("MetaReportScreen");
+                int gorillaSpectator = 1 << LayerMask.NameToLayer("Gorilla Spectator");
+                int mirrorOnlyMask = 1 << LayerMask.NameToLayer("MirrorOnly");
+                int noMirrorMask = 1 << LayerMask.NameToLayer("NoMirror");
 
-            useCam.cullingMask &= ~metaReportScreen;
-            useCam.cullingMask |= gorillaSpectator;
-            useCam.cullingMask |= mirrorOnlyMask;
-            useCam.cullingMask &= ~noMirrorMask;
+                useCam.cullingMask &= ~metaReportScreen;
+                useCam.cullingMask |= gorillaSpectator;
+                useCam.cullingMask |= mirrorOnlyMask;
+                useCam.cullingMask &= ~noMirrorMask;
 
-            camBrain = useCam.GetComponent<CinemachineBrain>();
-            virtualCamera = camBrain.ActiveVirtualCamera.VirtualCameraGameObject.GetComponent<CinemachineVirtualCamera>();
-            thirdPFollow = virtualCamera.transform.GetComponentInChildren<Cinemachine3rdPersonFollow>();
-            saFollowTarget = virtualCamera.transform.GetComponentInChildren<CinemachineSameAsFollowTarget>();
-
-            saFollowTarget.m_Damping = 1;
-            thirdPFollow.Damping = new Vector3(1, -0.5f, 1);
-            thirdPFollow.CameraCollisionFilter = GorillaLocomotion.Player.Instance.locomotionEnabledLayers;
-
-            defaultFOV = useCam.fieldOfView;
-
-            isInitialized = true;
+                camBrain = useCam.GetComponent<CinemachineBrain>();
+                virtualCamera = camBrain.ActiveVirtualCamera.VirtualCameraGameObject.GetComponent<CinemachineVirtualCamera>();
+                thirdPFollow = virtualCamera.transform.GetComponentInChildren<Cinemachine3rdPersonFollow>();
+                saFollowTarget = virtualCamera.transform.GetComponentInChildren<CinemachineSameAsFollowTarget>();
+                saFollowTarget.m_Damping = 1;
+                thirdPFollow.Damping = new Vector3(1, -0.5f, 1);
+                thirdPFollow.CameraCollisionFilter = GorillaLocomotion.Player.Instance.locomotionEnabledLayers;
+                defaultFOV = useCam.fieldOfView;
+                isInitialized = true;
+            }
         }
+
+        void Update() => VRLoaded =XRSettings.isDeviceActive;
 
         private void Start()
         {
+            leftStick = Config.Bind("Settings", "LeftStick", true);
             GorillaTagger.OnPlayerSpawned(() => StartCoroutine(Spawned()));
         }
 
@@ -97,7 +95,7 @@ namespace Graze_Cam
             }
         }
 
-        private void AlwaysRun()
+        private void VRAlwaysRun()
         {
             if (hintCanvas == null)
             {
@@ -132,53 +130,56 @@ namespace Graze_Cam
         {
             if (!isInitialized) return;
 
-            ControllerInputPoller.instance.leftControllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out bool lStickClick);
-            ControllerInputPoller.instance.rightControllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out bool rStickClick);
-            click = leftStick.Value ? lStickClick : rStickClick;
-
-            if (click && !debounce && !isRotating)
+            if (VRLoaded)
             {
-                debounce = true;
-                firstPerson = !firstPerson;
-                StartCoroutine(Debounce());
-            }
+                ControllerInputPoller.instance.leftControllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out bool lStickClick);
+                ControllerInputPoller.instance.rightControllerDevice.TryGetFeatureValue(CommonUsages.primary2DAxisClick, out bool rStickClick);
+                click = leftStick.Value ? lStickClick : rStickClick;
 
-            camBrain.enabled = !firstPerson;
-
-            if (firstPerson)
-            {
-                if (!inFirstPerson)
+                if (click && !debounce && !isRotating)
                 {
-                    useCam.transform.SetParent(Camera.main.transform, false);
-                    useCam.transform.localPosition = Vector3.zero;
-                    useCam.transform.localRotation = Quaternion.Euler(Vector3.zero);
-                    foreach (GameObject g in GorillaTagger.Instance.offlineVRRig.overrideCosmetics)
-                    {
-                        g.layer = LayerMask.NameToLayer("NoMirror");
-                    }
-                    useCam.fieldOfView = 90;
-                    inFirstPerson = true;
+                    debounce = true;
+                    firstPerson = !firstPerson;
+                    StartCoroutine(Debounce());
                 }
-                FirstPersonView();
-            }
-            else
-            {
-                if (inFirstPerson)
-                {
-                    useCam.transform.SetParent(GorillaTagger.Instance.thirdPersonCamera.transform, false);
-                    useCam.transform.localPosition = Vector3.zero;
-                    useCam.transform.localRotation = targetRotation;
-                    foreach (GameObject g in GorillaTagger.Instance.offlineVRRig.overrideCosmetics)
-                    {
-                        g.layer = 0;
-                    }
-                    useCam.fieldOfView = defaultFOV;
-                    inFirstPerson = false;
-                }
-                ThirdPersonView();
-            }
 
-            AlwaysRun();
+                camBrain.enabled = !firstPerson;
+
+                if (firstPerson)
+                {
+                    if (!inFirstPerson)
+                    {
+                        useCam.transform.SetParent(Camera.main.transform, false);
+                        useCam.transform.localPosition = Vector3.zero;
+                        useCam.transform.localRotation = Quaternion.Euler(Vector3.zero);
+                        foreach (GameObject g in GorillaTagger.Instance.offlineVRRig.overrideCosmetics)
+                        {
+                            g.layer = LayerMask.NameToLayer("MetaReportScreen");
+                        }
+                        useCam.fieldOfView = 90;
+                        inFirstPerson = true;
+                    }
+                    FirstPersonView();
+                }
+                else
+                {
+                    if (inFirstPerson)
+                    {
+                        useCam.transform.SetParent(GorillaTagger.Instance.thirdPersonCamera.transform, false);
+                        useCam.transform.localPosition = Vector3.zero;
+                        useCam.transform.localRotation = targetRotation;
+                        foreach (GameObject g in GorillaTagger.Instance.offlineVRRig.overrideCosmetics)
+                        {
+                            g.layer = 0;
+                        }
+                        useCam.fieldOfView = defaultFOV;
+                        inFirstPerson = false;
+                    }
+                    ThirdPersonView();
+                }
+
+                VRAlwaysRun();
+            }
         }
 
         private void ThirdPersonView()
